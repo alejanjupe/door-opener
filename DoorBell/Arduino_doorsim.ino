@@ -15,21 +15,20 @@ const char* mqtt_password = "tu_contraseña";
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// Variables para almacenar el estado de los LED
+// Variables para el LED
 bool ledStateDoor1 = false;
 unsigned long ledOnTimeDoor1 = 0;
 
 // Datos del timbre
-const char* hostname = "your esp-rfid hostname"; // Cambia esto por tu hostname
+const char* hostname = "FABLAB-MAKEIT";
 
 // Configuración del relé
-const int relayPin = 4; // Pin al que está conectado el relé (ajusta si es necesario)
-unsigned long relayOnTime = 0; // Para gestionar el tiempo de activación del relé
+const int relayPin = 4;
+unsigned long relayOnTime = 0;
 
 void setup() {
   Serial.begin(9600);
 
-  // Conexión a WiFi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
@@ -37,7 +36,6 @@ void setup() {
   }
   Serial.println("Conectado a WiFi");
 
-  // Conexión a MQTT
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
 
@@ -53,10 +51,9 @@ void setup() {
     }
   }
 
-  // Inicializar los pines de los LED
   pinMode(13, OUTPUT);
-  pinMode(relayPin, OUTPUT); // Configurar el pin del relé como salida
-  digitalWrite(relayPin, LOW); // Asegurarse de que el relé está apagado al inicio
+  pinMode(relayPin, OUTPUT);
+  digitalWrite(relayPin, LOW);
 }
 
 void loop() {
@@ -65,14 +62,12 @@ void loop() {
   }
   client.loop();
 
-  // Controlar el LED de la puerta 1 según su estado
   controlLED(13, ledStateDoor1, ledOnTimeDoor1);
 
-  // Controlar el relé, apagar después de 3 segundos
-  if (millis() - relayOnTime >= 3000 && relayOnTime > 0) { // Después de 3 segundos
-    digitalWrite(relayPin, LOW); // Apagar el relé
-    Serial.println("Relé apagado"); // Imprimir mensaje cuando el relé se apaga
-    relayOnTime = 0; // Resetear el tiempo
+  if (millis() - relayOnTime >= 2000 && relayOnTime > 0) {
+    digitalWrite(relayPin, LOW);
+    Serial.println("Relé apagado");
+    relayOnTime = 0;
   }
 }
 
@@ -80,59 +75,54 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Mensaje recibido [");
   Serial.print(topic);
   Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
 
-  // Control de los LED basado en el topic del mensaje recibido
-  if (strcmp(topic, mqtt_topic_door1) == 0) {
+  String message;
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.println(message);
+
+  // Verifica que el topic sea el correcto
+  if (strcmp(topic, mqtt_topic_door1) != 0) {
+    return;
+  }
+
+  // Parsear el JSON recibido
+  StaticJsonDocument<300> jsonDoc;
+  DeserializationError error = deserializeJson(jsonDoc, message);
+
+  if (error) {
+    Serial.print("Error al deserializar JSON: ");
+    Serial.println(error.f_str());
+    return;
+  }
+
+  // Extraer campos clave
+  const char* cmd = jsonDoc["cmd"];
+  const char* desc = jsonDoc["desc"];
+
+  if (cmd && desc && strcmp(cmd, "event") == 0 && strcmp(desc, "Doorbell ringing") == 0) {
     ledStateDoor1 = true;
     ledOnTimeDoor1 = millis();
-    sendDoorbellMessage("Door 1"); // Enviar mensaje del timbre
-    sendNotificationToPublisher("Door 1 opened"); // Enviar notificación al publicador
+    sendNotificationToPublisher("Door 1 opened");
 
-    // Activar el relé para encender las luces (12V) durante 3 segundos
-    digitalWrite(relayPin, HIGH); // Encender el relé (12V)
-    Serial.println("Relé activado"); // Imprimir mensaje cuando el relé se activa
-    relayOnTime = millis(); // Registrar el tiempo de activación del relé
+    digitalWrite(relayPin, HIGH);
+    Serial.println("Relé activado");
+    relayOnTime = millis();
   } else {
-    ledStateDoor1 = false;
+    Serial.println("Mensaje recibido, pero no cumple condiciones");
   }
-}
-
-void sendDoorbellMessage(const char* doorName) {
-  unsigned long currentTime = millis() / 1000; // Tiempo en segundos
-  StaticJsonDocument<200> jsonDoc; // Crear un documento JSON
-  
-  jsonDoc["type"] = "INFO"; // Tipo de mensaje
-  jsonDoc["src"] = doorName; // Nombre de la puerta
-  jsonDoc["desc"] = "Doorbell ringing"; // Descripción del evento
-  jsonDoc["data"] = ""; // Datos adicionales (vacío en este caso)
-  jsonDoc["time"] = currentTime; // Marca de tiempo
-  jsonDoc["cmd"] = "event"; // Comando relacionado
-  
-  // Asignar el nombre del host basado en el nombre de la puerta
-  String topicName = String(doorName) + "_topic"; 
-  jsonDoc["hostname"] = topicName; // Nombre del host
-
-  String jsonString;
-  serializeJson(jsonDoc, jsonString); // Serializar el documento JSON a una cadena
-
-  Serial.println(jsonString); // Imprimir mensaje en el monitor serial
-  client.publish("door/events", jsonString.c_str()); // Publicar el mensaje en el tópico MQTT
 }
 
 void sendNotificationToPublisher(const char* message) {
-  StaticJsonDocument<200> jsonDoc; // Crear un documento JSON para la notificación
-  
-  jsonDoc["type"] = "INFO"; // Tipo de mensaje
-  jsonDoc["message"] = message; // Mensaje de notificación
+  StaticJsonDocument<200> jsonDoc;
+
+  jsonDoc["type"] = "INFO";
+  jsonDoc["message"] = message;
 
   String jsonString;
-  serializeJson(jsonDoc, jsonString); // Serializar el documento JSON a una cadena
+  serializeJson(jsonDoc, jsonString);
 
-  // Publicar el mensaje en el tópico de notificaciones
   client.publish("door/notifications", jsonString.c_str());
 }
 
@@ -151,8 +141,9 @@ void reconnect() {
 }
 
 void controlLED(int ledPin, bool& ledState, unsigned long& ledOnTime) {
-  if (ledState && (millis() - ledOnTime >= 5000)) { // Si el LED está encendido y han pasado 5 segundos
-    ledState = false; // Apagar el LED
+  if (ledState && (millis() - ledOnTime >= 5000)) {
+    ledState = false;
   }
   digitalWrite(ledPin, ledState);
 }
+
